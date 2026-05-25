@@ -1,0 +1,5 @@
+# Demo credentials file
+# Format: username|||password|||cookies
+john_doe|||P@ssw0rd123|||session_id=abc123; token=xyz789
+jane_smith|||MySecret456|||session_id=def456; token=uvw012
+test_user|||TestPass789|||session_id=ghi789; token=rst345
