@@ -9,32 +9,81 @@ Based on FULL HTML Structure:
 - Convert → Convert button click → Push button click
 - API: /api/info (lock state), /api/push (push endpoint)
 - Polling: every 5s for lock state, 2s for job progress
+
+Termux Setup Instructions:
+  pkg update && pkg upgrade -y
+  pkg install -y x11-repo tur-repo chromium python
+  pip install requests selenium webdriver-manager
+  export BOT_TOKEN="your_token_here"
+  export ADMIN_CHAT_ID="your_chat_id_here"
+  python -m py_compile skysysx_bot.py
+  python skysysx_bot.py
 """
 
 import os
 import re
+import sys
 import time
 import json
 import base64
+import logging
 import requests
 import threading
 from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Dependency check
+missing_deps = []
+try:
+    import requests
+except ImportError:
+    missing_deps.append("requests")
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+except ImportError:
+    missing_deps.append("selenium")
+
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    HAS_WEBDRIVER_MANAGER = True
+except ImportError:
+    HAS_WEBDRIVER_MANAGER = False
+
+if missing_deps:
+    print("Missing dependencies. Install with:")
+    print(f"  pip install {' '.join(missing_deps)}")
+    sys.exit(1)
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8590664728:AAFNdWkMCr37OZHEPgl_NGbJNibMMhyLT9M"
-ADMIN_CHAT_ID = "5624145641"
+BOT_TOKEN = os.environ.get("8590664728:AAFNdWkMCr37OZHEPgl_NGbJNibMMhyLT9M")
+ADMIN_CHAT_ID = os.environ.get("5624145641")
 TARGET_URL = "http://skysysx.net/e/thanatos"
 API_BASE = "http://skysysx.net"
 REFRESH_INTERVAL = 5  # seconds for lock state check
 CONVERT_BATCH_SIZE = 50
 # ===================================
+
+if not BOT_TOKEN or not ADMIN_CHAT_ID:
+    print("Error: BOT_TOKEN and ADMIN_CHAT_ID environment variables are required.")
+    print("Set them before running:")
+    print('  export BOT_TOKEN="your_bot_token_here"')
+    print('  export ADMIN_CHAT_ID="your_chat_id_here"')
+    sys.exit(1)
 
 # Globals
 driver = None
@@ -51,7 +100,7 @@ def init_driver():
     global driver
     
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -60,17 +109,42 @@ def init_driver():
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     
-    # Termux-specific paths
-    if os.path.exists("/data/data/com.termux/files/usr/bin/chromium"):
+    # Termux-specific options
+    is_termux = os.path.exists("/data/data/com.termux/files/usr/bin/pkg")
+    if is_termux:
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-background-networking")
+        chrome_options.add_argument("--disable-default-apps")
         chrome_options.binary_location = "/data/data/com.termux/files/usr/bin/chromium"
     
+    # Try Selenium's normal driver discovery first
     try:
         driver = webdriver.Chrome(options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        logger.info("Driver initialized using Selenium's default discovery")
         return True
     except Exception as e:
-        print(f"[!] Driver init failed: {e}")
-        return False
+        logger.debug(f"Default driver discovery failed: {e}")
+    
+    # Try webdriver-manager if available
+    if HAS_WEBDRIVER_MANAGER:
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            logger.info("Driver initialized using webdriver-manager")
+            return True
+        except Exception as e:
+            logger.error(f"webdriver-manager failed: {e}")
+    
+    # All methods failed
+    logger.error("Driver initialization failed")
+    if is_termux:
+        logger.error("Termux detected. ChromeDriver may be incompatible on Android.")
+        logger.error("Try: pkg install chromium && pip install webdriver-manager")
+        logger.error("If still failing, ChromeDriver may not support your Android architecture.")
+    return False
 
 
 # ========== SERVER / API CHECKS ==========
@@ -82,7 +156,8 @@ def check_api_info():
         if r.ok:
             return r.json()
         return None
-    except:
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"API info check failed: {e}")
         return None
 
 def is_server_online():
@@ -101,9 +176,9 @@ def is_server_online():
     
     # Check order closed banner (push_locked=True) vs API offline
     if push_locked:
-        print("[!] Push locked by admin (order closed)")
+        logger.info("Push locked by admin (order closed)")
     if api_offline or webhook_status == "fail":
-        print("[!] API offline or webhook failed")
+        logger.info("API offline or webhook failed")
     
     return False
 
@@ -140,8 +215,8 @@ def send_tg(text, chat_id=None):
             "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }, timeout=10)
-    except:
-        pass
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"Telegram send failed: {e}")
 
 def send_tg_file(filepath, caption="", chat_id=None):
     """Send file to Telegram"""
@@ -151,8 +226,8 @@ def send_tg_file(filepath, caption="", chat_id=None):
         with open(filepath, "rb") as f:
             requests.post(url, files={"document": f}, 
                          data={"chat_id": cid, "caption": caption}, timeout=30)
-    except:
-        pass
+    except (requests.exceptions.RequestException, IOError) as e:
+        logger.debug(f"Telegram file send failed: {e}")
 
 def get_updates(offset=0):
     """Get pending messages"""
@@ -160,7 +235,8 @@ def get_updates(offset=0):
     try:
         r = requests.get(url, params={"offset": offset + 1, "timeout": 10}, timeout=15)
         return r.json().get("result", [])
-    except:
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"Get updates failed: {e}")
         return []
 
 
@@ -173,23 +249,26 @@ def parse_creds_file(filepath):
     if not os.path.exists(filepath):
         return creds_list
     
-    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            
-            # Input format: username|||password|||season cookies
-            if '|||' in line:
-                parts = line.split('|||')
-                username = parts[0].strip() if len(parts) > 0 else ""
-                password = parts[1].strip() if len(parts) > 1 else ""
-                cookies = parts[2].strip() if len(parts) > 2 else ""
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
                 
-                if username and password and cookies:
-                    # Convert to site format: username|password|cookie
-                    site_line = f"{username}|{password}|{cookies}"
-                    creds_list.append(site_line)
+                # Input format: username|||password|||season cookies
+                if '|||' in line:
+                    parts = line.split('|||')
+                    username = parts[0].strip() if len(parts) > 0 else ""
+                    password = parts[1].strip() if len(parts) > 1 else ""
+                    cookies = parts[2].strip() if len(parts) > 2 else ""
+                    
+                    if username and password and cookies:
+                        # Convert to site format: username|password|cookie
+                        site_line = f"{username}|{password}|{cookies}"
+                        creds_list.append(site_line)
+    except IOError as e:
+        logger.error(f"Failed to read credentials file: {e}")
     
     return creds_list
 
@@ -222,7 +301,7 @@ def check_push_interface_visible():
         interface = driver.find_element(By.ID, "pushInterface")
         display = interface.value_of_css_property("display")
         return display != "none"
-    except:
+    except Exception:
         return False
 
 def paste_to_source_textarea(batch_lines):
@@ -243,10 +322,10 @@ def paste_to_source_textarea(batch_lines):
         """)
         
         line_count = len(batch_lines)
-        print(f"[+] Pasted {line_count} lines into #source")
+        logger.info(f"Pasted {line_count} lines into #source")
         return True
     except Exception as e:
-        print(f"[!] Paste error: {e}")
+        logger.error(f"Paste error: {e}")
         return False
 
 def click_convert_button():
@@ -257,7 +336,7 @@ def click_convert_button():
             driver.execute_script("arguments[0].scrollIntoView(true);", btn)
             time.sleep(0.5)
             btn.click()
-            print("[+] Clicked Convert button")
+            logger.info("Clicked Convert button")
             time.sleep(3)  # Wait for conversion to complete
             return True
         
@@ -265,14 +344,14 @@ def click_convert_button():
         btn2 = wait_for_element(By.XPATH, "//button[contains(text(), 'Convert')]", timeout=5)
         if btn2:
             btn2.click()
-            print("[+] Clicked Convert (fallback)")
+            logger.info("Clicked Convert (fallback)")
             time.sleep(3)
             return True
             
-        print("[!] Convert button not found")
+        logger.warning("Convert button not found")
         return False
     except Exception as e:
-        print(f"[!] Convert click error: {e}")
+        logger.error(f"Convert click error: {e}")
         return False
 
 def click_push_button():
@@ -283,7 +362,7 @@ def click_push_button():
             # Check if disabled
             disabled = btn.get_attribute("disabled")
             if disabled:
-                print("[!] Push button is disabled — may need to convert first")
+                logger.warning("Push button is disabled — may need to convert first")
                 return False
             
             driver.execute_script("arguments[0].scrollIntoView(true);", btn)
@@ -291,7 +370,7 @@ def click_push_button():
             
             # Click via JS for reliability
             driver.execute_script("arguments[0].click();", btn)
-            print("[+] Clicked Push button")
+            logger.info("Clicked Push button")
             time.sleep(4)  # Wait for push to initiate
             return True
         
@@ -299,14 +378,14 @@ def click_push_button():
         btn2 = wait_for_element(By.XPATH, "//button[contains(text(), 'Push')]", timeout=5)
         if btn2:
             driver.execute_script("arguments[0].click();", btn2)
-            print("[+] Clicked Push (fallback)")
+            logger.info("Clicked Push (fallback)")
             time.sleep(4)
             return True
             
-        print("[!] Push button not found")
+        logger.warning("Push button not found")
         return False
     except Exception as e:
-        print(f"[!] Push click error: {e}")
+        logger.error(f"Push click error: {e}")
         return False
 
 def get_push_result():
@@ -316,7 +395,7 @@ def get_push_result():
         text = result_el.text.strip()
         if text and text != "Not pushed":
             return text
-    except:
+    except Exception:
         pass
     
     # Also check target textarea for converted output
@@ -325,7 +404,7 @@ def get_push_result():
         target_text = target_el.get_attribute("value")
         if target_text:
             return f"✅ Converted successfully ({len(target_text.split(chr(10)))} lines)"
-    except:
+    except Exception:
         pass
     
     return None
@@ -336,7 +415,7 @@ def get_converted_count():
         ok_el = driver.find_element(By.ID, "okCount")
         fail_el = driver.find_element(By.ID, "failCount")
         return ok_el.text, fail_el.text
-    except:
+    except Exception:
         return "Success: ?", "Failed: ?"
 
 
@@ -448,7 +527,7 @@ def run_conversion_job():
                 send_tg(f"✅ *Batch {idx} Complete*\n`{result_preview}`")
             else:
                 fail_count += len(batch)
-                send_tg(f"❌ *Batch {idx} Failed*\n`{msg[:200]}`")
+                send_tg(f" *Batch {idx} Failed*\n`{msg[:200]}`")
             
             # Small delay between batches
             time.sleep(2)
@@ -469,14 +548,13 @@ def run_conversion_job():
                 f.write(str(line) + "\n\n")
         
         send_tg_file(result_file, 
-            f"📁 *Results*\n✅ {success_count}/{total} pushed\n {len(push_job_ids)} jobs")
+            f" *Results*\n✅ {success_count}/{total} pushed\n {len(push_job_ids)} jobs")
         
         send_tg(f"🏁 *Complete!*\n✅ {success_count} | ❌ {fail_count}")
         
     except Exception as e:
         send_tg(f"❌ *Error:* `{str(e)[:300]}`")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Conversion job error")
     finally:
         conversion_running = False
 
@@ -508,18 +586,24 @@ def handle_telegram_commands():
                     file_name = document.get("file_name", "creds.txt")
                     
                     # Download file from Telegram
-                    file_info = requests.get(
-                        f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-                    ).json()
-                    file_path_tg = file_info["result"]["file_path"]
-                    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path_tg}"
-                    
-                    os.makedirs("uploads", exist_ok=True)
-                    local_path = f"uploads/{chat_id}_{file_name}"
-                    
-                    r = requests.get(download_url)
-                    with open(local_path, 'wb') as f:
-                        f.write(r.content)
+                    try:
+                        file_info = requests.get(
+                            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}",
+                            timeout=10
+                        ).json()
+                        file_path_tg = file_info["result"]["file_path"]
+                        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path_tg}"
+                        
+                        os.makedirs("uploads", exist_ok=True)
+                        local_path = f"uploads/{chat_id}_{file_name}"
+                        
+                        r = requests.get(download_url, timeout=30)
+                        with open(local_path, 'wb') as f:
+                            f.write(r.content)
+                    except (requests.exceptions.RequestException, KeyError, IOError) as e:
+                        logger.error(f"File download failed: {e}")
+                        send_tg("❌ Failed to download file.", chat_id)
+                        continue
                     
                     # Parse credentials
                     global pending_creds
@@ -546,7 +630,7 @@ def handle_telegram_commands():
                     continue
                 
                 if text.lower() == 'go' and not conversion_running and pending_creds:
-                    send_tg("🚀 Starting now...", chat_id)
+                    send_tg(" Starting now...", chat_id)
                     threading.Thread(target=run_conversion_job, daemon=True).start()
                 
                 elif text.startswith('/'):
@@ -554,7 +638,7 @@ def handle_telegram_commands():
                     
                     if cmd == '/start':
                         send_tg(
-                            "🤖 *Skysysx Auto-Push Bot*\n\n"
+                            " *Skysysx Auto-Push Bot*\n\n"
                             "Commands:\n"
                             "`/start` — Help\n"
                             "`go` — Start pushing now\n"
@@ -589,13 +673,15 @@ def handle_telegram_commands():
             
             time.sleep(1)
         except Exception as e:
-            print(f"[!] Cmd error: {e}")
+            logger.error(f"Command handler error: {e}")
             time.sleep(3)
 
 
 # ========== MAIN FUNCTION ==========
 
 def main():
+    global HAS_WEBDRIVER_MANAGER
+    
     print("""
     ==========================================
       Skysysx Auto-Push Bot v3.0
@@ -605,30 +691,64 @@ def main():
     ==========================================
     """)
     
-    # Init Chrome
-    if not init_driver():
-        print("[!] Installing chromium/chromium-driver...")
-        # Try Termux first, then Debian/Ubuntu
-        if os.path.exists("/data/data/com.termux/files/usr/bin/pkg"):
-            os.system("pkg install -y chromium chromium-driver")
-        else:
-            os.system("sudo apt install -y chromium-driver")
-        if not init_driver():
-            print("[!] Failed. Install manually:")
-            print("  Termux: pkg install chromium chromium-driver")
-            print("  Linux:  sudo apt install chromium-driver")
+    # Check if webdriver-manager is available
+    if not HAS_WEBDRIVER_MANAGER:
+        logger.info("webdriver-manager not found. Installing...")
+        is_termux = os.path.exists("/data/data/com.termux/files/usr/bin/pkg")
+        try:
+            if is_termux:
+                os.system("pip install webdriver-manager")
+            else:
+                os.system("pip3 install webdriver-manager")
+            
+            # Try to import again
+            from webdriver_manager.chrome import ChromeDriverManager
+            HAS_WEBDRIVER_MANAGER = True
+            logger.info("webdriver-manager installed successfully")
+        except ImportError:
+            logger.error("Failed to install webdriver-manager")
+            logger.error("Please run: pip install webdriver-manager")
             return
     
-    print("[+] Browser ready")
+    # Init Chrome
+    if not init_driver():
+        logger.info("Installing chromium...")
+        # Try Termux first, then Debian/Ubuntu
+        is_termux = os.path.exists("/data/data/com.termux/files/usr/bin/pkg")
+        try:
+            if is_termux:
+                logger.info("Termux detected. Installing Chromium...")
+                os.system("pkg update && pkg upgrade -y")
+                os.system("pkg install -y chromium")
+            else:
+                os.system("sudo apt install -y chromium-driver")
+        except Exception as e:
+            logger.error(f"Package installation failed: {e}")
+        
+        if not init_driver():
+            logger.error("Failed to initialize driver. Install manually:")
+            if is_termux:
+                logger.info("  Termux: pkg install chromium")
+                logger.info("          pip install webdriver-manager")
+            else:
+                logger.info("  Linux:  sudo apt install chromium-driver")
+                logger.info("          pip3 install webdriver-manager")
+            return
+    
+    logger.info("Browser ready")
     
     # Start handler
     try:
         handle_telegram_commands()
     except KeyboardInterrupt:
-        print("\n[*] Stopping...")
+        logger.info("Stopping...")
+    finally:
         if driver:
-            driver.quit()
-        print("[*] Done.")
+            try:
+                driver.quit()
+            except Exception as e:
+                logger.debug(f"Error quitting driver: {e}")
+        logger.info("Done.")
 
 if __name__ == "__main__":
     main()
