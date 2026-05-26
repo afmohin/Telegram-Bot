@@ -47,7 +47,7 @@ push_job_ids = []
 # ========== SELENIUM SETUP ==========
 
 def init_driver():
-    """Initialize headless Chrome driver"""
+    """Initialize headless Chrome driver (works on Termux, Linux, Windows)"""
     global driver
     
     chrome_options = Options()
@@ -59,6 +59,10 @@ def init_driver():
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
+    
+    # Termux-specific paths
+    if os.path.exists("/data/data/com.termux/files/usr/bin/chromium"):
+        chrome_options.binary_location = "/data/data/com.termux/files/usr/bin/chromium"
     
     try:
         driver = webdriver.Chrome(options=chrome_options)
@@ -603,10 +607,16 @@ def main():
     
     # Init Chrome
     if not init_driver():
-        print("[!] Installing chromium-driver...")
-        os.system("sudo apt install -y chromium-driver")
+        print("[!] Installing chromium/chromium-driver...")
+        # Try Termux first, then Debian/Ubuntu
+        if os.path.exists("/data/data/com.termux/files/usr/bin/pkg"):
+            os.system("pkg install -y chromium chromium-driver")
+        else:
+            os.system("sudo apt install -y chromium-driver")
         if not init_driver():
-            print("[!] Failed. Run: sudo apt install chromium-driver")
+            print("[!] Failed. Install manually:")
+            print("  Termux: pkg install chromium chromium-driver")
+            print("  Linux:  sudo apt install chromium-driver")
             return
     
     print("[+] Browser ready")
